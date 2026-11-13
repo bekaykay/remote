@@ -214,7 +214,10 @@
         opened = true; connecting = false; registered = false;
         certHint.classList.remove('show');
         setStatus('Pairing…', 'warn');
-        sock.send(JSON.stringify(registerMsg(signed)));
+        // Newer webOS wants hello, then getSystemInfo, before it accepts registration.
+        stage = 'hello';
+        sock.send(JSON.stringify({ id: 'hello', type: 'hello', payload: {} }));
+        preRegTimer = setTimeout(() => sendSysInfo(sock), 2500);
       };
       sock.onmessage = onMain;
       sock.onerror = () => {};
@@ -228,7 +231,7 @@
           closesBeforePair++;
           if (closesBeforePair >= 2) ls.del(LS_KEY); // a stale pairing key can also make the TV hang up
           signed = !signed;
-          setStatus(`TV closed pairing${lastTvError ? ' (' + lastTvError + ')' : ''}, retrying (${closesBeforePair})…`, '');
+          setStatus(`TV closed at ${stage}${lastTvError ? ': ' + lastTvError : ''}, retrying (${closesBeforePair})…`, '');
           scheduleRetry(closesBeforePair > 4 ? 6000 : 1500);
           return;
         }
@@ -246,8 +249,25 @@
     tryOpen(true);
   }
 
+  let preRegTimer = null, regSent = false, stage = '';
+  function sendSysInfo(sock) {
+    clearTimeout(preRegTimer);
+    if (sock !== ws || sock.readyState !== 1) return;
+    regSent = false; stage = 'info';
+    sock.send(JSON.stringify({ id: 'get_sys_info', type: 'request', uri: 'ssap://system/getSystemInfo', payload: {} }));
+    preRegTimer = setTimeout(() => sendRegister(sock), 2500);
+  }
+  function sendRegister(sock) {
+    clearTimeout(preRegTimer);
+    if (regSent || sock !== ws || sock.readyState !== 1) return;
+    regSent = true; stage = signed ? 'pair A' : 'pair B';
+    sock.send(JSON.stringify(registerMsg(signed)));
+  }
+
   function onMain(ev) {
     let m; try { m = JSON.parse(ev.data); } catch { return; }
+    if (m.id === 'hello' || m.type === 'hello') { sendSysInfo(ws); return; }
+    if (m.id === 'get_sys_info') { sendRegister(ws); return; }
     if (m.id === 'register_0') {
       if (m.type === 'error') lastTvError = String(m.error || 'error').slice(0, 60);
       if (m.type === 'error' && signed) {
@@ -256,6 +276,7 @@
         return;
       }
       if (m.type === 'response' && m.payload && m.payload.pairingType === 'PROMPT') {
+        stage = 'prompt';
         setStatus('Accept the prompt on your TV', 'warn');
         return;
       }
